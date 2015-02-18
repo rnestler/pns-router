@@ -18,8 +18,8 @@
  * with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#ifndef __PNS_LINE_PLACER_H
-#define __PNS_LINE_PLACER_H
+#ifndef __PNS_DIFF_PLACER_H
+#define __PNS_DIFF_PLACER_H
 
 #include <math/vector2d.h>
 
@@ -30,6 +30,9 @@
 #include "pns_node.h"
 #include "pns_via.h"
 #include "pns_line.h"
+#include "pns_algo_base.h"
+#include "pns_diff_pair.h"
+
 #include "pns_placement_algo.h"
 
 class PNS_ROUTER;
@@ -40,7 +43,6 @@ class PNS_VIA;
 class PNS_SIZES_SETTINGS;
 
 
-
 /**
  * Class PNS_LINE_PLACER
  *
@@ -48,11 +50,11 @@ class PNS_SIZES_SETTINGS;
  * Applies shove and walkaround algorithms when needed.
  */
 
-class PNS_LINE_PLACER : public PNS_PLACEMENT_ALGO
+class PNS_DIFF_PAIR_PLACER : public PNS_PLACEMENT_ALGO
 {
 public:
-    PNS_LINE_PLACER( PNS_ROUTER* aRouter );
-    ~PNS_LINE_PLACER();
+    PNS_DIFF_PAIR_PLACER( PNS_ROUTER* aRouter );
+    ~PNS_DIFF_PAIR_PLACER();
 
     /**
      * Function Start()
@@ -95,30 +97,6 @@ public:
      * Sets the current routing layer.
      */
     bool SetLayer( int aLayer );
-
-
-    /**
-     * Function Head()
-     *
-     * Returns the "head" of the line being placed, that is the volatile part
-     * that has not "settled" yet.
-     */
-    const PNS_LINE& Head() const { return m_head; }
-
-    /**
-     * Function Tail()
-     *
-     * Returns the "tail" of the line being placed, the part which has already wrapped around
-     * and shoved some obstacles.
-     */
-    const PNS_LINE& Tail() const { return m_tail; }
-
-    /**
-     * Function Trace()
-     *
-     * Returns the complete routed line.
-     */
-    const PNS_LINE Trace() const;
 
     /**
      * Function Traces()
@@ -181,12 +159,16 @@ public:
      */
     void UpdateSizes( const PNS_SIZES_SETTINGS& aSizes );
 
-    void SetOrthoMode ( bool aOrthoMode );
-
     bool IsPlacingVia() const { return m_placingVia; }
+
+    void SetOrthoMode ( bool aOrthoMode );
 
     void GetModifiedNets( std::vector<int> &aNets ) const;
 private:
+
+    int viaGap() const;
+    int gap() const;
+
     /**
      * Function route()
      *
@@ -230,138 +212,45 @@ private:
      */
     void setInitialDirection( const DIRECTION_45& aDirection );
 
-    /**
-     * Function splitAdjacentSegments()
-     *
-     * Checks if point aP lies on segment aSeg. If so, splits the segment in two,
-     * forming a joint at aP and stores updated topology in node aNode.
-     */
-    void splitAdjacentSegments( PNS_NODE* aNode, PNS_ITEM* aSeg, const VECTOR2I& aP );
-
-    /**
-     * Function removeLoops()
-     *
-     * Searches aNode for traces concurrent to aLatest and removes them. Updated
-     * topology is stored in aNode.
-     */
-    void removeLoops( PNS_NODE* aNode, PNS_LINE* aLatest );
-
-    /**
-     * Function simplifyNewLine()
-     *
-     * Assembles a line starting from segment aLatest, removes collinear segments
-     * and redundant vertexes. If a simplification bhas been found, replaces the
-     * old line with the simplified one in aNode.
-     */
-    void simplifyNewLine( PNS_NODE* aNode, PNS_SEGMENT* aLatest );
-
-    /**
-     * Function handleViaPlacement()
-     *
-     * Attempts to find a spot to place the via at the end of line aHead.
-     */
-    bool handleViaPlacement( PNS_LINE& aHead );
-
-    /**
-     * Function checkObtusity()
-     *
-     * Helper function, checking if segments a and b form an obtuse angle
-     * (in 45-degree regime).
-     * @return true, if angle (aA, aB) is obtuse
-     */
-    bool checkObtusity( const SEG& aA, const SEG& aB ) const;
-
-    /**
-     * Function handleSelfIntersections()
-     *
-     * Checks if the head of the track intersects its tail. If so, cuts the
-     * tail up to the intersecting segment and fixes the head direction to match
-     * the last segment before the cut.
-     * @return true if the line has been changed.
-     */
-    bool handleSelfIntersections();
-
-    /**
-     * Function handlePullback()
-     *
-     * Deals with pull-back: reduces the tail if head trace is moved backwards
-     * wrs to the current tail direction.
-     * @return true if the line has been changed.
-     */
-    bool handlePullback();
-
-    /**
-     * Function mergeHead()
-     *
-     * Moves "estabished" segments from the head to the tail if certain
-     * conditions are met.
-     * @return true, if the line has been changed.
-     */
-    bool mergeHead();
-
-    /**
-     * Function reduceTail()
-     *
-     * Attempts to reduce the numer of segments in the tail by trying to replace a
-     * certain number of latest tail segments with a direct trace leading to aEnd
-     * that does not collide with anything.
-     * @param aEnd: current routing destination point.
-     * @return true if the line has been changed.
-     */
-    bool reduceTail( const VECTOR2I& aEnd );
-
-    /**
-     * Function optimizeTailHeadTransition()
-     *
-     * Tries to reduce the corner count of the most recent part of tail/head by
-     * merging obtuse/collinear segments.
-     * @return true, if the line has been changed.
-     */
-    bool optimizeTailHeadTransition();
-
-    /**
-     * Function routeHead()
-     *
-     * Computes the head trace between the current start point (m_p_start) and
-     * point aP, starting with direction defined in m_direction. The trace walks
-     * around all colliding solid or non-movable items. Movable segments are
-     * ignored, as they'll be handled later by the shove algorithm.
-     */
-    bool routeHead( const VECTOR2I& aP, PNS_LINE& aNewHead);
-
-    /**
-     * Function routeStep()
-     *
-     * Performs a single routing alorithm step, for the end point aP.
-     * @param aP ending point of current route
-     * @return true, if the line has been changed.
-     */
-    void routeStep( const VECTOR2I& aP );
-
+    
+    bool routeHead( const VECTOR2I& aP );
+    bool tryWalkDp ( PNS_NODE* aNode, PNS_DIFF_PAIR &aPair, bool aSolidsOnly );
+    
     ///> route step, walkaround mode
-    bool rhWalkOnly( const VECTOR2I& aP, PNS_LINE& aNewHead);
+    bool rhWalkOnly( const VECTOR2I& aP );
 
     ///> route step, shove mode
-    bool rhShoveOnly( const VECTOR2I& aP, PNS_LINE& aNewHead);
+    bool rhShoveOnly ( const VECTOR2I& aP );
 
     ///> route step, mark obstacles mode
-    bool rhMarkObstacles( const VECTOR2I& aP, PNS_LINE& aNewHead );
+    bool rhMarkObstacles( const VECTOR2I& aP );
 
-    const PNS_VIA makeVia ( const VECTOR2I& aP );
-    const SHAPE_LINE_CHAIN buildInitialLine ( const VECTOR2I& aP );
+    const PNS_VIA makeVia ( const VECTOR2I& aP, int aNet );
+
+    bool findDpPrimitivePair ( const VECTOR2I& aP, PNS_ITEM *aItem, PNS_DP_PRIMITIVE_PAIR& aPair );
+    OPT_VECTOR2I getDanglingAnchor ( PNS_NODE *aNode, PNS_ITEM *aItem );
+    int matchDpSuffix ( wxString aNetName, wxString& aComplementNet, wxString& aBaseDpName );
+    bool attemptWalk ( PNS_NODE *aNode, PNS_DIFF_PAIR *aCurrent, PNS_DIFF_PAIR& aWalk, bool aPFirst, bool aWindCw, bool aSolidsOnly );
+    bool propagateDpHeadForces ( const VECTOR2I& aP, VECTOR2I& aNewP );
+
+    enum State {
+        RT_START = 0,
+        RT_ROUTE = 1,
+        RT_FINISH = 2
+    };
+
+    State m_state;
+
+    bool m_chainedPlacement;
+    bool m_initialDiagonal;
+    bool m_startDiagonal;
+    bool m_fitOk;
+
+    int m_netP, m_netN;
     
-    ///> current routing direction
-    DIRECTION_45 m_direction;
+    PNS_DP_PRIMITIVE_PAIR m_start;
+    boost::optional<PNS_DP_PRIMITIVE_PAIR> m_prevPair;
 
-    ///> routing direction for new traces
-    DIRECTION_45 m_initial_direction;
-
-    ///> routing "head": volatile part of the track from the previously
-    ///  analyzed point to the current routing destination
-    PNS_LINE m_head;
-
-    ///> routing "tail": part of the track that has been already fixed due to collisions with obstacles
-    PNS_LINE m_tail;
 
     ///> current algorithm iteration
     int m_iteration;
@@ -399,17 +288,16 @@ private:
     int m_currentLayer;
 
     bool m_startsOnVia;
+    bool m_orthoMode;
+    bool m_snapOnTarget;
 
     VECTOR2I m_currentEnd, m_currentStart;
-    PNS_LINE m_currentTrace;
+    PNS_DIFF_PAIR m_currentTrace;
 
+    PNS_ITEM *m_currentEndItem;
     PNS_MODE m_currentMode;
-    PNS_ITEM* m_startItem;
-
+    
     bool m_idle;
-    bool m_chainedPlacement;
-    bool m_splitSeg;
-    bool m_orthoMode;
 };
 
 #endif    // __PNS_LINE_PLACER_H

@@ -1,7 +1,7 @@
 /*
  * KiRouter - a push-and-(sometimes-)shove PCB router
  *
- * Copyright (C) 2013-2014 CERN
+ * Copyright (C) 2013-2015 CERN
  * Author: Tomasz Wlostowski <tomasz.wlostowski@cern.ch>
  * Author: Maciej Suminski <maciej.suminski@cern.ch>
  *
@@ -19,44 +19,34 @@
  * with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#ifndef __ROUTER_TOOL_H
-#define __ROUTER_TOOL_H
+#ifndef __LENGTH_TUNER_TOOL_H
+#define __LENGTH_TUNER_TOOL_H
 
 #include "pns_tool_base.h"
+#include "pns_meander.h"
 
-class APIEXPORT ROUTER_TOOL : public PNS_TOOL_BASE
+class PNS_TUNE_STATUS_POPUP;
+
+class APIEXPORT LENGTH_TUNER_TOOL : public PNS_TOOL_BASE
 {
 public:
-    ROUTER_TOOL();
-    ~ROUTER_TOOL();
+    LENGTH_TUNER_TOOL();
+    ~LENGTH_TUNER_TOOL();
 
     void Reset( RESET_REASON aReason );
 
-    int RouteSingleTrace ( const TOOL_EVENT& aEvent );
-    int RouteDiffPair ( const TOOL_EVENT& aEvent );
-    int InlineDrag ( const TOOL_EVENT& aEvent );
-
-    int DpDimensionsDialog ( const TOOL_EVENT& aEvent );
-    int SettingsDialog ( const TOOL_EVENT& aEvent );
+    int TuneSingleTrace ( const TOOL_EVENT& aEvent );
+    int TuneDiffPair ( const TOOL_EVENT& aEvent );
+    int TuneDiffPairSkew ( const TOOL_EVENT& aEvent );
+    int ClearMeanders ( const TOOL_EVENT& aEvent );
 
 private:
 
+    void performTuning( );
     int mainLoop( PNS_ROUTER_MODE aMode );
-
-    int getDefaultWidth( int aNetCode );
-
-    void performRouting();
-    void performDragging();
-
-    void getNetclassDimensions( int aNetCode, int& aWidth, int& aViaDiameter, int& aViaDrill );
     void handleCommonEvents( const TOOL_EVENT& evt );
 
-    int getStartLayer( const PNS_ITEM* aItem );
-    void switchLayerOnViaPlacement();
-    bool onViaCommand( VIATYPE_T aType );
-
-    bool prepareInteractive( );
-    bool finishInteractive( bool aSaveUndoBuffer );
+    PNS_MEANDER_SETTINGS m_savedMeanderSettings;
 };
 
 #endif

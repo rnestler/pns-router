@@ -36,6 +36,7 @@
 #include <pcb_painter.h>
 #include <dialogs/dialog_pns_settings.h>
 #include <dialogs/dialog_pns_diff_pair_dimensions.h>
+#include <dialogs/dialog_pns_length_tuning_settings.h>
 #include <dialogs/dialog_track_via_size.h>
 #include <base_units.h>
 
@@ -47,6 +48,8 @@
 #include "router_tool.h"
 #include "pns_segment.h"
 #include "pns_router.h"
+#include "pns_meander_placer.h" // fixme: move settings to separate header
+#include "pns_tune_status_popup.h"
 #include "trace.h"
 
 using namespace KIGFX;
@@ -76,6 +79,9 @@ static TOOL_ACTION ACT_PlaceMicroVia( "pcbnew.InteractiveRouter.PlaceMicroVia",
 static TOOL_ACTION ACT_CustomTrackWidth( "pcbnew.InteractiveRouter.CustomTrackWidth",
                                       AS_CONTEXT, 'W',
                                       "Custom Track Width", "Shows a dialog for changing the track width and via size.");
+static TOOL_ACTION ACT_RouterOptions( "pcbnew.InteractiveRouter.RouterOptions",
+                                      AS_CONTEXT, 'E',
+                                      "Routing Options...", "Shows a dialog containing router options.");
 static TOOL_ACTION ACT_SwitchPosture( "pcbnew.InteractiveRouter.SwitchPosture",
                                       AS_CONTEXT, '/',
                                       "Switch Track Posture", "Switches posture of the currenly routed track.");
@@ -84,10 +90,31 @@ static TOOL_ACTION ACT_SetDpDimensions( "pcbnew.InteractiveRouter.SetDpDimension
                                       AS_CONTEXT, 'D',
                                       "Differential Pair Dimensions...", "Sets the width and gap of the currently routed differential pair.");
 
+static TOOL_ACTION ACT_SetLengthTune( "pcbnew.InteractiveRouter.LengthTunerSettings",
+                                      AS_CONTEXT, 'L',
+                                      "Length Tuning Settings", "Sets the length tuning parameters for currently routed item.");
+
+static TOOL_ACTION ACT_LengthTuneSpacingIncrease( "pcbnew.InteractiveRouter.LengthTunerSpacingIncrease",
+                                      AS_CONTEXT, '1',
+                                      "Length Tuning Settings", "Sets the length tuning parameters for currently routed item.");
+
+static TOOL_ACTION ACT_LengthTuneSpacingDecrease( "pcbnew.InteractiveRouter.LengthTunerSpacingDecrease",
+                                      AS_CONTEXT, '2',
+                                      "Length Tuning Settings", "Sets the length tuning parameters for currently routed item.");
+
+static TOOL_ACTION ACT_SetLengthTuneAmplIncrease( "pcbnew.InteractiveRouter.LengthTunerAmplIncrease",
+                                      AS_CONTEXT, '3',
+                                      "Length Tuning Settings", "Sets the length tuning parameters for currently routed item.");
+
+static TOOL_ACTION ACT_SetLengthTuneAmplDecrease( "pcbnew.InteractiveRouter.LengthTunerAmplDecrease",
+                                      AS_CONTEXT, '4',
+                                      "Length Tuning Settings", "Sets the length tuning parameters for currently routed item.");
+
 
 ROUTER_TOOL::ROUTER_TOOL() :
-    PNS_TOOL_BASE( "pcbnew.InteractiveRouter" )
-{    
+    TOOL_INTERACTIVE( "pcbnew.InteractiveRouter" )
+{
+    m_router = NULL;
 }
 
 
@@ -154,7 +181,7 @@ public:
     }
 
 protected:
-    OPT_TOOL_EVENT handleCustomEvent( const wxMenuEvent& aEvent )
+    OPT_TOOL_EVENT handleCustomEvent( const wxEvent& aEvent )
     {
 #if ID_POPUP_PCB_SELECT_VIASIZE1 < ID_POPUP_PCB_SELECT_WIDTH1
 #error You have changed event ids order, it breaks code. Check the source code for more details.
@@ -185,7 +212,7 @@ protected:
             bds.SetTrackWidthIndex( 0 );
         }
 
-        else if( id >= ID_POPUP_PCB_SELECT_VIASIZE1 )     // via size has changed
+        else if( id > ID_POPUP_PCB_SELECT_VIASIZE1 )     // via size has changed
         {
             assert( id < ID_POPUP_PCB_SELECT_WIDTH_END_RANGE );
 
@@ -234,26 +261,42 @@ public:
             Add( ACT_SetDpDimensions );
         
         AppendSeparator();
-        Add( PNS_TOOL_BASE::ACT_RouterOptions );
+        Add( ACT_RouterOptions );
     }
 };
 
 
 ROUTER_TOOL::~ROUTER_TOOL()
 {
-
+    delete m_router;
 }
 
 
 void ROUTER_TOOL::Reset( RESET_REASON aReason )
 {
-    PNS_TOOL_BASE::Reset( aReason );
+    printf("RESET\n");
+    if( m_router )
+        delete m_router;
+
+    m_frame = getEditFrame<PCB_EDIT_FRAME>();
+    m_ctls = getViewControls();
+    m_board = getModel<BOARD>();
+
+    m_router = new PNS_ROUTER;
+
+    m_router->ClearWorld();
+    m_router->SetBoard( m_board );
+    m_router->SyncWorld();
+    m_router->LoadSettings( m_savedSettings );
+    m_router->UpdateSizes( m_savedSizes );
+    m_needsSync = false;
+
+    if( getView() )
+        m_router->SetView( getView() );
     
     Go( &ROUTER_TOOL::RouteSingleTrace, COMMON_ACTIONS::routerActivateSingle.MakeEvent() );
     Go( &ROUTER_TOOL::RouteDiffPair, COMMON_ACTIONS::routerActivateDiffPair.MakeEvent() );
-    Go( &ROUTER_TOOL::DpDimensionsDialog, COMMON_ACTIONS::routerActivateDpDimensionsDialog.MakeEvent() );
-    Go( &ROUTER_TOOL::SettingsDialog, COMMON_ACTIONS::routerActivateSettingsDialog.MakeEvent() );
-       
+    Go( &ROUTER_TOOL::TuneSingleTrace, COMMON_ACTIONS::routerActivateTuneSingleTrace.MakeEvent() );
 }
 
 int ROUTER_TOOL::getDefaultWidth( int aNetCode )
@@ -288,7 +331,92 @@ void ROUTER_TOOL::getNetclassDimensions( int aNetCode, int& aWidth,
     aViaDrill = netClass->GetViaDrill();
 }
 
-void ROUTER_TOOL::handleCommonEvents( const TOOL_EVENT& aEvent )
+
+PNS_ITEM* ROUTER_TOOL::pickSingleItem( const VECTOR2I& aWhere, int aNet, int aLayer )
+{
+    int tl = getView()->GetTopLayer();
+
+    if( aLayer > 0 )
+        tl = aLayer;
+
+    PNS_ITEM* prioritized[4];
+
+    for( int i = 0; i < 4; i++ )
+        prioritized[i] = 0;
+
+    PNS_ITEMSET candidates = m_router->QueryHoverItems( aWhere );
+
+    BOOST_FOREACH( PNS_ITEM* item, candidates.Items() )
+    {
+        if( !IsCopperLayer( item->Layers().Start() ) )
+            continue;
+
+        // fixme: this causes flicker with live loop removal...
+        //if( item->Parent() && !item->Parent()->ViewIsVisible() )
+        //    continue;
+
+        if( aNet < 0 || item->Net() == aNet )
+        {
+            if( item->OfKind( PNS_ITEM::VIA | PNS_ITEM::SOLID ) )
+            {
+                if( !prioritized[2] )
+                    prioritized[2] = item;
+                if( item->Layers().Overlaps( tl ) )
+                    prioritized[0] = item;
+            }
+            else
+            {
+                if( !prioritized[3] )
+                    prioritized[3] = item;
+                if( item->Layers().Overlaps( tl ) )
+                    prioritized[1] = item;
+            }
+        }
+    }
+
+    PNS_ITEM* rv = NULL;
+    PCB_EDIT_FRAME* frame = getEditFrame<PCB_EDIT_FRAME> ();
+    DISPLAY_OPTIONS* displ_opts = (DISPLAY_OPTIONS*)frame->GetDisplayOptions();
+
+    for( int i = 0; i < 4; i++ )
+    {
+        PNS_ITEM* item = prioritized[i];
+
+        if( displ_opts->m_ContrastModeDisplay )
+            if( item && !item->Layers().Overlaps( tl ) )
+                item = NULL;
+
+        if( item )
+        {
+            rv = item;
+            break;
+        }
+    }
+
+    if( rv && aLayer >= 0 && !rv->Layers().Overlaps( aLayer ) )
+        rv = NULL;
+
+    if( rv )
+        TRACE( 0, "%s, layer : %d, tl: %d", rv->KindStr().c_str() % rv->Layers().Start() % tl );
+
+    return rv;
+}
+
+
+void ROUTER_TOOL::highlightNet( bool aEnabled, int aNetcode )
+{
+    RENDER_SETTINGS* rs = getView()->GetPainter()->GetSettings();
+
+    if( aNetcode >= 0 && aEnabled )
+        rs->SetHighlight( true, aNetcode );
+    else
+        rs->SetHighlight( false );
+
+    getView()->UpdateAllLayersColor();
+}
+
+
+void ROUTER_TOOL::handleCommonEvents( TOOL_EVENT& aEvent )
 {
 #ifdef DEBUG
     if( aEvent.IsKeyPressed() )
@@ -322,6 +450,21 @@ void ROUTER_TOOL::handleCommonEvents( const TOOL_EVENT& aEvent )
             m_router->UpdateSizes( sizes );
         }
     }
+    else if( aEvent.IsAction( &ACT_SetLengthTune ) )
+    {
+        PNS_MEANDER_PLACER *placer = dynamic_cast <PNS_MEANDER_PLACER *> ( m_router->Placer() );
+
+        if(!placer)
+            return;
+
+        PNS_MEANDER_SETTINGS settings = placer->Settings();
+        DIALOG_PNS_LENGTH_TUNING_SETTINGS settingsDlg( m_frame, settings, m_router->Mode() );
+
+        if( settingsDlg.ShowModal() )
+        {
+            placer->UpdateSettings ( settings );
+        }
+    }
     else if( aEvent.IsAction( &ACT_CustomTrackWidth ) )
     {
         BOARD_DESIGN_SETTINGS& bds = m_board->GetDesignSettings();
@@ -337,10 +480,105 @@ void ROUTER_TOOL::handleCommonEvents( const TOOL_EVENT& aEvent )
     else if( aEvent.IsAction( &COMMON_ACTIONS::trackViaSizeChanged ) )
     {
 
-        PNS_SIZES_SETTINGS sizes ( m_router->Sizes() );
+        PNS_SIZES_SETTINGS sizes ( m_savedSizes );
         sizes.ImportCurrent ( m_board->GetDesignSettings() );
         m_router->UpdateSizes ( sizes );
     }
+}
+
+
+void ROUTER_TOOL::updateStartItem( TOOL_EVENT& aEvent )
+{
+    int tl = getView()->GetTopLayer();
+    VECTOR2I cp = m_ctls->GetCursorPosition();
+    PNS_ITEM* startItem = NULL;
+
+    if( aEvent.IsMotion() || aEvent.IsClick() )
+    {
+        bool snapEnabled = !aEvent.Modifier( MD_SHIFT );
+        
+        VECTOR2I p( aEvent.Position() );
+        startItem = pickSingleItem( p );
+        m_router->EnableSnapping ( snapEnabled );
+
+        if( !snapEnabled && startItem && !startItem->Layers().Overlaps( tl ) )
+            startItem = NULL;
+
+        if( startItem && startItem->Net() >= 0 )
+        {
+            bool dummy;
+            VECTOR2I psnap = m_router->SnapToItem( startItem, p, dummy );
+
+            if( snapEnabled )
+            {
+                m_startSnapPoint = psnap;
+                m_ctls->ForceCursorPosition( true, psnap );
+            }
+            else
+            {
+                m_startSnapPoint = cp;
+                m_ctls->ForceCursorPosition( false );
+            }
+
+//            if( startItem->Layers().IsMultilayer() )
+//                m_startLayer = tl;
+//            else
+//                m_startLayer = startItem->Layers().Start();
+
+            m_startItem = startItem;
+        }
+        else
+        {
+            m_startItem = NULL;
+            m_startSnapPoint = cp;
+            m_ctls->ForceCursorPosition( false );
+        }
+    }
+}
+
+
+void ROUTER_TOOL::updateEndItem( TOOL_EVENT& aEvent )
+{
+    VECTOR2I mp = m_ctls->GetMousePosition();
+    VECTOR2I p = getView()->ToWorld( mp );
+    VECTOR2I cp = m_ctls->GetCursorPosition();
+    int layer;
+    bool snapEnabled = !aEvent.Modifier( MD_CTRL );
+
+    m_router->EnableSnapping( snapEnabled );
+
+    if( !snapEnabled || m_router->GetCurrentNet() < 0 || !m_startItem )
+    {
+        m_endItem = NULL;
+        m_endSnapPoint = cp;
+        return;
+    }
+
+    bool dummy;
+
+    if( m_router->IsPlacingVia() )
+        layer = -1;
+    else
+        layer = m_router->GetCurrentLayer();
+
+    PNS_ITEM* endItem = pickSingleItem( p, m_startItem->Net(), layer );
+
+    if( endItem )
+    {
+        VECTOR2I cursorPos = m_router->SnapToItem( endItem, p, dummy );
+        m_ctls->ForceCursorPosition( true, cursorPos );
+        m_endItem = endItem;
+        m_endSnapPoint = cursorPos;
+    }
+    else
+    {
+        m_endItem = NULL;
+        m_endSnapPoint = cp;
+        m_ctls->ForceCursorPosition( false );
+    }
+
+    if( m_endItem )
+        TRACE( 0, "%s, layer : %d", m_endItem->KindStr().c_str() % m_endItem->Layers().Start() );
 }
 
 int ROUTER_TOOL::getStartLayer( const PNS_ITEM* aItem )
@@ -423,12 +661,15 @@ bool ROUTER_TOOL::onViaCommand( VIATYPE_T aType )
     return false;
 }
 
+//void ROUTER_TOOL::prepareRouting()
+//{}
 
-bool ROUTER_TOOL::prepareInteractive()
+void ROUTER_TOOL::performRouting()
 {
-    int routingLayer = getStartLayer ( m_startItem );
+    bool saveUndoBuffer = true;
+    
+	int routingLayer = getStartLayer ( m_startItem );
     m_frame->SetActiveLayer( ToLAYER_ID ( routingLayer ) );
-
     // fixme: switch on invisible layer
 
     if( m_startItem && m_startItem->Net() >= 0 )
@@ -443,56 +684,25 @@ bool ROUTER_TOOL::prepareInteractive()
     m_ctls->ForceCursorPosition( false );
     m_ctls->SetAutoPan( true );
 
-    PNS_SIZES_SETTINGS sizes ( m_router->Sizes() );
-
+    PNS_SIZES_SETTINGS sizes ( m_savedSizes );
     sizes.Init ( m_board, m_startItem );
     sizes.AddLayerPair ( m_frame->GetScreen()->m_Route_Layer_TOP,
                          m_frame->GetScreen()->m_Route_Layer_BOTTOM );
     m_router->UpdateSizes( sizes );
-    
+
     if ( !m_router->StartRouting( m_startSnapPoint, m_startItem, routingLayer ) )
     {
         wxMessageBox ( m_router->FailureReason(), _("Error") );
         highlightNet ( false );
-        return false;
+        return;
     }
+
+
+    m_tuneStatusPopup = new PNS_TUNE_STATUS_POPUP ( m_frame );
+    m_tuneStatusPopup->Popup();
 
     m_endItem = NULL;
     m_endSnapPoint = m_startSnapPoint;
-
-    return true;
-}
-
-bool ROUTER_TOOL::finishInteractive( bool aSaveUndoBuffer )
-{
-    m_router->StopRouting();
-
-    if( aSaveUndoBuffer )
-    {
-        // Save the recent changes in the undo buffer
-        m_frame->SaveCopyInUndoList( m_router->GetUndoBuffer(), UR_UNSPECIFIED );
-        m_router->ClearUndoBuffer();
-        m_frame->OnModify();
-    }
-    else
-    {
-        // It was interrupted by TA_UNDO_REDO event, so we have to sync the world now
-        m_needsSync = true;
-    }
-
-    m_ctls->SetAutoPan( false );
-    m_ctls->ForceCursorPosition( false );
-    highlightNet( false );
-
-    return true;
-}
-
-void ROUTER_TOOL::performRouting()
-{
-    bool saveUndoBuffer = true;
-
-    if ( !prepareInteractive( ) )
-        return;
 
     while( OPT_TOOL_EVENT evt = Wait() )
     {
@@ -505,6 +715,14 @@ void ROUTER_TOOL::performRouting()
         }
         else if( evt->IsMotion() )
         {
+            
+            wxPoint p = wxGetMousePosition();
+            p.x+=20;
+            p.y+=20;
+            m_tuneStatusPopup->Update (m_router);
+            m_tuneStatusPopup->Move(p);
+
+
             updateEndItem( *evt );
             m_router->SetOrthoMode ( evt->Modifier ( MD_CTRL ) );
             m_router->Move( m_endSnapPoint, m_endItem );
@@ -556,49 +774,44 @@ void ROUTER_TOOL::performRouting()
         handleCommonEvents( *evt );
     }
 
-    finishInteractive ( saveUndoBuffer );
-}
+    m_router->StopRouting();
 
-int ROUTER_TOOL::DpDimensionsDialog( const TOOL_EVENT& aEvent )
-{
-    Activate();
-
-    PNS_SIZES_SETTINGS sizes = m_router->Sizes();
-    DIALOG_PNS_DIFF_PAIR_DIMENSIONS settingsDlg( m_frame, sizes );
-
-    if( settingsDlg.ShowModal() )
+    if( saveUndoBuffer )
     {
-        m_router->UpdateSizes( sizes );
-        m_savedSizes = sizes;
-    }   
-
-    return 0;
-}
-
-int ROUTER_TOOL::SettingsDialog( const TOOL_EVENT& aEvent )
-{
-    Activate();
-
-    DIALOG_PNS_SETTINGS settingsDlg( m_frame, m_router->Settings() );
-
-    if( settingsDlg.ShowModal() )
-    {
-        m_savedSettings = m_router->Settings();
+        // Save the recent changes in the undo buffer
+        m_frame->SaveCopyInUndoList( m_router->GetUndoBuffer(), UR_UNSPECIFIED );
+        m_router->ClearUndoBuffer();
+        m_frame->OnModify();
     }
-    return 0;
+    else
+    {
+        // It was interrupted by TA_UNDO_REDO event, so we have to sync the world now
+        m_needsSync = true;
+    }
+
+    delete m_tuneStatusPopup;
+
+    m_ctls->SetAutoPan( false );
+    m_ctls->ForceCursorPosition( false );
+    highlightNet( false );
 }
 
-
-int ROUTER_TOOL::RouteSingleTrace( const TOOL_EVENT& aEvent )
+int ROUTER_TOOL::RouteSingleTrace( TOOL_EVENT& aEvent )
 {
     m_frame->SetToolID( ID_TRACK_BUTT, wxCURSOR_PENCIL, _( "Route Track" ) );
     return mainLoop( PNS_MODE_ROUTE_SINGLE );
 }
 
-int ROUTER_TOOL::RouteDiffPair( const TOOL_EVENT& aEvent )
+int ROUTER_TOOL::RouteDiffPair( TOOL_EVENT& aEvent )
 {
     m_frame->SetToolID( ID_TRACK_BUTT, wxCURSOR_PENCIL, _( "Router Differential Pair" ) );
     return mainLoop( PNS_MODE_ROUTE_DIFF_PAIR );
+}
+
+int ROUTER_TOOL::TuneSingleTrace( TOOL_EVENT& aEvent )
+{
+    m_frame->SetToolID( ID_TRACK_BUTT, wxCURSOR_PENCIL, _( "Tune Track Length" ) );
+    return mainLoop( PNS_MODE_TUNE_SINGLE );
 }
 
 int ROUTER_TOOL::mainLoop( PNS_ROUTER_MODE aMode )
@@ -662,6 +875,50 @@ int ROUTER_TOOL::mainLoop( PNS_ROUTER_MODE aMode )
     return 0;
 }
 
+int ROUTER_TOOL::InlineDrag ( TOOL_EVENT& aEvent )
+{
+    return 0;
+
+    #if 0
+    VIEW_CONTROLS* ctls = getViewControls();
+    PCB_EDIT_FRAME* frame = getEditFrame<PCB_EDIT_FRAME>();
+    BOARD* board = getModel<BOARD>();
+
+    printf("RouterTool::InlineDrag!\n");
+    Reset();
+
+    m_toolMgr->RunAction( COMMON_ACTIONS::selectionClear, true );
+    ctls->SetSnapping( true );
+    ctls->ShowCursor( true );
+
+    m_startItem = m_router->QueryItemByParent ( )
+
+    bool dragStarted = m_router->StartDragging( m_startSnapPoint, m_startItem );
+
+    while( OPT_TOOL_EVENT evt = Wait() )
+    {
+        if( evt->IsCancel() )
+            break;
+        else if( evt->IsMotion() )
+        {
+            updateEndItem( *evt );
+            m_router->Move( m_endSnapPoint, m_endItem );
+        } 
+        else if( evt->IsUp( BUT_LEFT ) )
+        {
+            if( m_router->FixRoute( m_endSnapPoint, m_endItem ) )
+                break;
+        }
+    }
+
+    if( m_router->RoutingInProgress() )
+        m_router->StopRouting();
+
+    return 0;
+    #endif
+
+}
+
 void ROUTER_TOOL::performDragging()
 {
     PCB_EDIT_FRAME* frame = getEditFrame<PCB_EDIT_FRAME>();
@@ -722,9 +979,3 @@ void ROUTER_TOOL::performDragging()
     ctls->ForceCursorPosition( false );
     highlightNet( false );
 }
-
-int ROUTER_TOOL::InlineDrag ( const TOOL_EVENT& aEvent )
-{
-    return 0;
-}
-
